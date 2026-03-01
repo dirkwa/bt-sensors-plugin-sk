@@ -11,6 +11,7 @@ const OutOfRangeDevice = require("./OutOfRangeDevice.js")
 const { createChannel, createSession } = require("better-sse");
 const { clearTimeout } = require('timers')
 const loadClassMap = require('./classLoader.js')
+const RemoteGatewayManager = require('./RemoteGatewayManager.js')
 const { debug } = require("node:console")
 class MissingSensor  {
 
@@ -363,10 +364,32 @@ module.exports =   function (app) {
 				const session = await createSession(req,res)
 				channel.register(session)
 				req.on("close", ()=>{
-					channel.deregister(session)	
+					channel.deregister(session)
 				})
 			});
-		
+
+			// Remote BLE Gateway endpoint
+			const gatewayManager = new RemoteGatewayManager({
+				plugin,
+				sensorMap,
+				instantiateSensor,
+				addSensorToList,
+				getDeviceConfig,
+			})
+
+			router.post('/gateway/advertisements', async (req, res) => {
+				try {
+					await gatewayManager.handleAdvertisements(req.body)
+					res.status(200).json({
+						status: 'ok',
+						count: req.body.devices?.length || 0,
+					})
+				} catch (e) {
+					plugin.debug(`RemoteGateway: ${e.message}`)
+					res.status(400).json({ error: e.message })
+				}
+			});
+
 		};
 
 		function sensorsToJSON(){
