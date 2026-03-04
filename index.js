@@ -264,6 +264,16 @@ module.exports =   function (app) {
 		
 		}
 
+		// Initialize the remote BLE gateway manager early, before BT adapter init
+		// which may fail. The gateway works without a local BT adapter.
+		gatewayManager = new RemoteGatewayManager({
+			plugin,
+			sensorMap,
+			instantiateSensor,
+			addSensorToList,
+			getDeviceConfig,
+		})
+
 		// Add start()-dependent routes to the router that was stored at module level
 		const router = pluginRouter
 		if (router) {
@@ -406,14 +416,6 @@ module.exports =   function (app) {
 				})
 			});
 
-			// Initialize the remote BLE gateway manager (route already registered at module level)
-			gatewayManager = new RemoteGatewayManager({
-				plugin,
-				sensorMap,
-				instantiateSensor,
-				addSensorToList,
-				getDeviceConfig,
-			})
 		}
 
 		function sensorsToJSON(){
