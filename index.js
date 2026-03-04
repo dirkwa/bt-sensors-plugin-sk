@@ -1,9 +1,21 @@
 const packageInfo = require("./package.json")
 
 
-const {createBluetooth} = require('@naugehyde/node-ble')
-const {Variant} = require('@jellybrick/dbus-next')
-const {bluetooth, destroy} = createBluetooth()
+let bluetooth, destroy
+try {
+  const {createBluetooth} = require('@naugehyde/node-ble')
+  const bt = createBluetooth()
+  bluetooth = bt.bluetooth
+  destroy = bt.destroy
+} catch (e) {
+  // BLE not available — remote gateway mode only
+}
+let Variant
+try {
+  Variant = require('@jellybrick/dbus-next').Variant
+} catch (e) {
+  // dbus not available
+}
 
 const BTSensor = require('./BTSensor.js')
 const BLACKLISTED = require('./sensor_classes/BlackListedDevice.js')
@@ -206,6 +218,30 @@ module.exports =   function (app) {
 
 	const sensorMap=new Map()
 
+	// Gateway manager — created inside start() once dependencies are available.
+	// The route is registered at module level so it exists before start() runs.
+	let gatewayManager = null
+	let pluginRouter = null
+
+	plugin.registerWithRouter = function(router) {
+		pluginRouter = router
+		router.post('/gateway/advertisements', async (req, res) => {
+			if (!gatewayManager) {
+				return res.status(503).json({ error: 'Plugin not started yet' })
+			}
+			try {
+				await gatewayManager.handleAdvertisements(req.body)
+				res.status(200).json({
+					status: 'ok',
+					count: req.body.devices?.length || 0,
+				})
+			} catch (e) {
+				plugin.debug(`RemoteGateway: ${e.message}`)
+				res.status(400).json({ error: e.message })
+			}
+		})
+	}
+
 	plugin.start = async function (options, restartPlugin) {
 	const classMap = loadClassMap(app)
 
@@ -228,7 +264,9 @@ module.exports =   function (app) {
 		
 		}
 
-		plugin.registerWithRouter = function(router) {
+		// Add start()-dependent routes to the router that was stored at module level
+		const router = pluginRouter
+		if (router) {
 			router.get('/getSensorInfo', async (req, res) => {
 				const _sensor = sensorMap.get(req.query?.mac_address)
 				const _class = classMap.get(req.query?.class)
@@ -368,29 +406,15 @@ module.exports =   function (app) {
 				})
 			});
 
-			// Remote BLE Gateway endpoint
-			const gatewayManager = new RemoteGatewayManager({
+			// Initialize the remote BLE gateway manager (route already registered at module level)
+			gatewayManager = new RemoteGatewayManager({
 				plugin,
 				sensorMap,
 				instantiateSensor,
 				addSensorToList,
 				getDeviceConfig,
 			})
-
-			router.post('/gateway/advertisements', async (req, res) => {
-				try {
-					await gatewayManager.handleAdvertisements(req.body)
-					res.status(200).json({
-						status: 'ok',
-						count: req.body.devices?.length || 0,
-					})
-				} catch (e) {
-					plugin.debug(`RemoteGateway: ${e.message}`)
-					res.status(400).json({ error: e.message })
-				}
-			});
-
-		};
+		}
 
 		function sensorsToJSON(){
 			return Array.from(
@@ -695,6 +719,7 @@ module.exports =   function (app) {
 
 		if (!adapterID || adapterID=="")
 			adapterID = "hci0"
+
 		//Check if Adapter has changed since last start()
 		if (adapter) {
 			if (adapter.adapter!=adapterID) {
@@ -707,7 +732,17 @@ module.exports =   function (app) {
 		if (!adapter){
 			plugin.debug(`Connecting to bluetooth adapter ${adapterID}`);
 
+			try {
 			adapter = await bluetooth.getAdapter(adapterID)
+			} catch (e) {
+				// BlueZ/D-Bus not available — remote gateway mode only
+				plugin.debug(`No local Bluetooth: ${e.message} — remote gateway mode only`)
+				plugin.setStatusText('Remote gateway mode (no local BLE)')
+				sensorMap.clear()
+				deviceConfigs=options?.peripherals??[]
+				starts++
+				return
+			}
 
 			//Set up DBUS listener to monitor Powered status of current adapter
 
