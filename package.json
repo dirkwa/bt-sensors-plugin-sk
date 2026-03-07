@@ -33,7 +33,7 @@
     "file-loader": "^6.1.1",
     "font-awesome": "^4.7.0",
     "mocha": "^8.0.1",
-    "prettier-standard": "^6.0.0",
+    "prettier": "^3.8.1",
     "react": "^16.13.1",
     "react-battery-gauge": "^1.0.7",
     "react-bootstrap": "^1.6.5",
@@ -52,7 +52,7 @@
     "webpack-cli": "^4.0.0"
   },
   "scripts": {
-    "format": "prettier-standard 'index.js'",
+    "format": "prettier --write 'index.js'",
     "test": "echo \"Error: no test specified\" && exit 1",
     "prepublishOnly": "npm run clean && npm run build",
     "dev": "webpack --watch --mode development",
