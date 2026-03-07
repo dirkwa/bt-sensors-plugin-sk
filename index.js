@@ -215,6 +215,8 @@ module.exports = function (app) {
 
   var discoveryIntervalID, progressID, progressTimeoutID, deviceHealthID
   var adapter
+  let bleApiMode = false // true when server manages local BT via BLE API
+  let bleApiUnsubscribe = null // unsubscribe from BLE API advertisements
   const channel = createChannel()
 
   plugin.debug(`Loading plugin ${packageInfo.version}`)
@@ -406,15 +408,28 @@ module.exports = function (app) {
       emitBLEAdvertisement
     })
 
-    // Register as BLE provider (if server supports v2 BLE API)
+    // Determine if server manages local Bluetooth via BLE API
+    bleApiMode =
+      app.bleApi && app.bleApi.localBluetoothManaged === true
+
+    // Register as BLE provider for remote gateways (ESP32s are bt-sensors-specific)
     if (typeof app.registerBLEProvider === 'function') {
       bleAdvCallbacks = new Set()
       app.registerBLEProvider({
-        name: 'bt-sensors BLE',
+        name: 'bt-sensors BLE (remote gateways)',
         methods: {
           startDiscovery: async () => {},
           stopDiscovery: async () => {},
-          getDevices: async () => Array.from(sensorMap.keys()),
+          getDevices: async () => {
+            // Only report devices seen by remote gateways, not local
+            const remoteDevices = []
+            for (const [mac, sensor] of sensorMap) {
+              if (sensor.device && sensor.device.constructor.name === 'RemoteDevice') {
+                remoteDevices.push(mac)
+              }
+            }
+            return remoteDevices
+          },
           onAdvertisement: (cb) => {
             bleAdvCallbacks.add(cb)
             plugin.debug(
@@ -436,6 +451,57 @@ module.exports = function (app) {
       plugin.debug(
         'BLE Provider API not available (app.registerBLEProvider not found)'
       )
+    }
+
+    // In BLE API mode, subscribe to server-managed advertisement stream
+    // for device discovery (local adapter managed by server, not by us)
+    if (bleApiMode) {
+      plugin.debug('BLE API mode: local Bluetooth managed by server')
+      const BLEApiDevice = require('./BLEApiDevice.js')
+
+      bleApiUnsubscribe = app.bleApi.onAdvertisement((adv) => {
+        // Only process advertisements from the local BLE provider
+        if (adv.providerId !== '_localBLE') return
+
+        const mac = adv.mac.toUpperCase()
+        let sensor = sensorMap.get(mac)
+
+        if (sensor) {
+          // Update existing sensor's device with new advertisement data
+          if (sensor.device && typeof sensor.device.updateAdvertisement === 'function') {
+            const mfrData = {}
+            if (adv.manufacturerData) {
+              for (const [id, hex] of Object.entries(adv.manufacturerData)) {
+                mfrData[id] = Buffer.from(hex, 'hex')
+              }
+            }
+            sensor.device.updateAdvertisement({
+              rssi: adv.rssi,
+              name: adv.name,
+              manufacturer_data: mfrData
+            })
+          }
+        } else {
+          // New device — create BLEApiDevice and initialize sensor
+          const mfrData = {}
+          if (adv.manufacturerData) {
+            for (const [id, hex] of Object.entries(adv.manufacturerData)) {
+              mfrData[id] = Buffer.from(hex, 'hex')
+            }
+          }
+          const device = new BLEApiDevice(mac, adv.name, {
+            rssi: adv.rssi,
+            manufacturer_data: mfrData
+          })
+          const config = getDeviceConfig(mac) || {
+            mac_address: mac,
+            discoveryTimeout: options?.discoveryTimeout ?? 30,
+            active: false,
+            unconfigured: true
+          }
+          initConfiguredDeviceWithDevice(device, config)
+        }
+      })
     }
 
     // Store a route installer so registerWithRouter() can register
@@ -806,6 +872,29 @@ module.exports = function (app) {
     function activeDevices() {
       return Array.from(sensorMap.values()).filter((s) => s.isActive()).length
     }
+    // Initialize a sensor from a device object directly (BLE API mode)
+    async function initConfiguredDeviceWithDevice(device, deviceConfig) {
+      const startNumber = starts
+      if (!deviceConfig.discoveryTimeout)
+        deviceConfig.discoveryTimeout = options?.discoveryTimeout ?? 30
+      try {
+        const sensor = await instantiateSensor(device, deviceConfig)
+        if (!sensor || startNumber !== starts) return
+        addSensorToList(sensor)
+        sensor.listen()
+        if (deviceConfig.active) {
+          try {
+            await sensor.activate(deviceConfig, plugin)
+            plugin.setStatusText(`Listening to ${activeDevices()} sensors.`)
+          } catch (e) {
+            sensor.setError(`Unable to activate sensor. Reason: ${e.message}`)
+          }
+        }
+      } catch (e) {
+        plugin.debug(`BLE API device init error: ${e.message}`)
+      }
+    }
+
     function initConfiguredDevice(deviceConfig) {
       const startNumber = starts
       plugin.setStatusText(`Initializing ${deviceNameAndAddress(deviceConfig)}`)
@@ -900,33 +989,40 @@ module.exports = function (app) {
 
     channel.broadcast({ state: 'started' }, 'pluginstate')
 
-    if (!adapterID || adapterID == '') adapterID = 'hci0'
-
-    //Check if Adapter has changed since last start()
-    if (adapter) {
-      if (adapter.adapter != adapterID) {
-        adapter.helper._propsProxy.removeAllListeners()
-        adapter = null
-      }
+    // In BLE API mode, skip local adapter init — server manages it
+    if (bleApiMode) {
+      plugin.debug('Skipping local adapter init (BLE API mode)')
+      adapter = null
     }
-    //Connect to adapter
 
-    if (!adapter) {
-      plugin.debug(`Connecting to bluetooth adapter ${adapterID}`)
+    if (!bleApiMode) {
+      if (!adapterID || adapterID == '') adapterID = 'hci0'
 
-      try {
-        adapter = await bluetooth.getAdapter(adapterID)
-      } catch (e) {
-        // BlueZ/D-Bus not available — remote gateway mode only
-        plugin.debug(
-          `No local Bluetooth: ${e.message} — remote gateway mode only`
-        )
-        plugin.setStatusText('Remote gateway mode (no local BLE)')
-        sensorMap.clear()
-        deviceConfigs = options?.peripherals ?? []
-        starts++
-        return
+      //Check if Adapter has changed since last start()
+      if (adapter) {
+        if (adapter.adapter != adapterID) {
+          adapter.helper._propsProxy.removeAllListeners()
+          adapter = null
+        }
       }
+      //Connect to adapter
+
+      if (!adapter) {
+        plugin.debug(`Connecting to bluetooth adapter ${adapterID}`)
+
+        try {
+          adapter = await bluetooth.getAdapter(adapterID)
+        } catch (e) {
+          // BlueZ/D-Bus not available — remote gateway mode only
+          plugin.debug(
+            `No local Bluetooth: ${e.message} — remote gateway mode only`
+          )
+          plugin.setStatusText('Remote gateway mode (no local BLE)')
+          sensorMap.clear()
+          deviceConfigs = options?.peripherals ?? []
+          starts++
+          return
+        }
 
       //Set up DBUS listener to monitor Powered status of current adapter
 
@@ -956,6 +1052,7 @@ module.exports = function (app) {
         return
       }
     }
+    } // end if (!bleApiMode)
 
     sensorMap.clear()
     if (channel) {
@@ -967,31 +1064,33 @@ module.exports = function (app) {
       plugin.stopped = false
     }
 
-    try {
-      const activeAdapters = await bluetooth.activeAdapters()
-      if (activeAdapters.length == 0) {
-        plugin.setError('No active Bluetooth adapters found.')
+    if (!bleApiMode) {
+      try {
+        const activeAdapters = await bluetooth.activeAdapters()
+        if (activeAdapters.length == 0) {
+          plugin.setError('No active Bluetooth adapters found.')
+        }
+        plugin.schema.properties.adapter.enum = []
+        plugin.schema.properties.adapter.enumNames = []
+        for (a of activeAdapters) {
+          plugin.schema.properties.adapter.enum.push(a.adapter)
+          plugin.schema.properties.adapter.enumNames.push(
+            `${a.adapter} @ ${await a.getAddress()} (${await a.getName()})`
+          )
+        }
+      } catch (e) {
+        plugin.setError(`Unable to get adapters: ${e.message}`)
       }
-      plugin.schema.properties.adapter.enum = []
-      plugin.schema.properties.adapter.enumNames = []
-      for (a of activeAdapters) {
-        plugin.schema.properties.adapter.enum.push(a.adapter)
-        plugin.schema.properties.adapter.enumNames.push(
-          `${a.adapter} @ ${await a.getAddress()} (${await a.getName()})`
-        )
-      }
-    } catch (e) {
-      plugin.setError(`Unable to get adapters: ${e.message}`)
-    }
 
-    await startScanner(options)
+      await startScanner(options)
+    }
     if (starts > 0) {
       plugin.debug(`Plugin ${packageInfo.version} restarting...`)
     } else {
       plugin.debug(`Plugin ${packageInfo.version} started`)
     }
     starts++
-    if (!(await adapter.isDiscovering()))
+    if (!bleApiMode && !(await adapter.isDiscovering()))
       try {
         await startScanner(options)
       } catch (e) {
@@ -1078,6 +1177,7 @@ module.exports = function (app) {
         }
       })
       if (
+        !bleApiMode &&
         sensorMap.size &&
         options.inactivityTimeout &&
         lastContactDelta > options.inactivityTimeout
@@ -1090,23 +1190,30 @@ module.exports = function (app) {
       }
     }, intervalTimeout)
 
-    if (!options.hasOwnProperty('discoveryInterval'))
-      //no config -- first run
-      options.discoveryInterval =
-        plugin.schema.properties.discoveryInterval.default
+    if (!bleApiMode) {
+      if (!options.hasOwnProperty('discoveryInterval'))
+        //no config -- first run
+        options.discoveryInterval =
+          plugin.schema.properties.discoveryInterval.default
 
-    if (options.discoveryInterval && !discoveryIntervalID)
-      findDeviceLoop(
-        options?.discoveryTimeout ??
-          plugin.schema.properties.discoveryTimeout.default,
-        options.discoveryInterval
-      )
+      if (options.discoveryInterval && !discoveryIntervalID)
+        findDeviceLoop(
+          options?.discoveryTimeout ??
+            plugin.schema.properties.discoveryTimeout.default,
+          options.discoveryInterval
+        )
+    }
   }
   plugin.stop = async function () {
     plugin.debug('Stopping plugin')
     plugin.stopped = true
     plugin.started = false
     bleAdvCallbacks = null
+    bleApiMode = false
+    if (bleApiUnsubscribe) {
+      bleApiUnsubscribe()
+      bleApiUnsubscribe = null
+    }
     channel.broadcast({ state: 'stopped' }, 'pluginstate')
     if (discoveryIntervalID) {
       clearInterval(discoveryIntervalID)

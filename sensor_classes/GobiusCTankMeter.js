@@ -349,13 +349,26 @@ class GobiusCTankMeter extends BTSensor{
         this.getJSONSchema().properties.params.required=["type" ]
     }
 
+    // BLE API descriptor mode
+    getGATTDescriptor() {
+        return {
+            mac: this.getMacAddress(),
+            service: '0000ffe0-0000-1000-8000-00805f9b34fb',
+            notify: ['0000ffe9-0000-1000-8000-00805f9b34fb']
+        }
+    }
+
+    handleGATTData(charUuid, data) {
+        this.emitValuesFrom(data)
+    }
+
     async initGATTConnection(isReconnecting){
-        await super.initGATTConnection(isReconnecting) 
-        const gattServer = await this.getGATTServer() 
-        const service = await gattServer.getPrimaryService("0000ffe0-0000-1000-8000-00805f9b34fb") 
+        await super.initGATTConnection(isReconnecting)
+        const gattServer = await this.getGATTServer()
+        const service = await gattServer.getPrimaryService("0000ffe0-0000-1000-8000-00805f9b34fb")
         this.characteristic = await service.getCharacteristic("0000ffe9-0000-1000-8000-00805f9b34fb")
     }
-    async initGATTNotifications() { 
+    async initGATTNotifications() {
         await this.characteristic.startNotifications()
         this.characteristic.on('valuechanged', buffer => {
                 this.emitValuesFrom(buffer)
@@ -366,6 +379,6 @@ class GobiusCTankMeter extends BTSensor{
         await this.stopGATTNotifications(this.characteristic)
         await super.deactivateGATT()
     }
-   
+
 }
 module.exports=GobiusCTankMeter
