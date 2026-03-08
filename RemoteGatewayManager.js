@@ -83,12 +83,22 @@ class RemoteGatewayManager {
     if (ipAddress) gattManager.ipAddress = ipAddress
     this.gattManagers.set(gatewayId, gattManager)
 
-    // Ping every 30s to detect dead connections
+    // Ping every 30s to detect dead connections; terminate if no pong within 10s
+    let pongReceived = true
     const pingInterval = setInterval(() => {
-      if (ws.readyState === ws.OPEN) {
-        ws.ping()
+      if (ws.readyState !== ws.OPEN) return
+      if (!pongReceived) {
+        this.plugin.debug(`RemoteGateway: no pong from ${gatewayId} — terminating`)
+        ws.terminate()
+        return
       }
+      pongReceived = false
+      ws.ping()
     }, 30000)
+
+    ws.on('pong', () => {
+      pongReceived = true
+    })
 
     ws.on('close', () => {
       clearInterval(pingInterval)
