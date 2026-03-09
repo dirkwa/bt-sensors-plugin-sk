@@ -446,6 +446,21 @@ class BTSensor extends EventEmitter {
                 this._gattHandle.onDisconnect(() => {
                     this.setConnected(false)
                     this.setState("RECONNECTING")
+                    if (!this.isActive()) return
+                    // Schedule re-subscribe after a short delay so the server
+                    // can finish cleaning up the stale GATT claim before we try again.
+                    setTimeout(async () => {
+                        if (!this.isActive()) return
+                        this.debug(`GATT disconnected — attempting re-subscribe for ${this.getName()}`)
+                        try {
+                            await this.deactivateGATT()
+                            await this.activateGATT(true)
+                            this.debug(`GATT re-subscribed for ${this.getName()}`)
+                        } catch (e) {
+                            this.debug(`GATT re-subscribe failed for ${this.getName()}: ${e.message}`)
+                            this.setError(`GATT reconnect failed: ${e.message}`)
+                        }
+                    }, 3000)
                 })
                 if (this._gattHandle.connected) {
                     this.setConnected(true)
