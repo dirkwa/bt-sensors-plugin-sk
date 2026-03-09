@@ -411,6 +411,7 @@ module.exports = function (app) {
     // Determine if server manages local Bluetooth via BLE API
     bleApiMode =
       app.bleApi && app.bleApi.localBluetoothManaged === true
+    plugin.debug(`bleApiMode=${bleApiMode} localBluetoothManaged=${app.bleApi?.localBluetoothManaged}`)
 
     // Register as BLE provider for remote gateways (ESP32s are bt-sensors-specific)
     if (typeof app.registerBLEProvider === 'function') {
@@ -460,10 +461,10 @@ module.exports = function (app) {
       const BLEApiDevice = require('./BLEApiDevice.js')
 
       bleApiUnsubscribe = app.bleApi.onAdvertisement((adv) => {
-        // Only process advertisements from the local BLE provider
-        if (adv.providerId !== '_localBLE') return
+        // Process advertisements from local BLE provider or any remote gateway
 
         const mac = adv.mac.toUpperCase()
+        plugin.debug(`adv mac=${mac} provider=${adv.providerId}`)
         let sensor = sensorMap.get(mac)
 
         if (sensor) {

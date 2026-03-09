@@ -12,6 +12,9 @@ class BLACKLISTED extends BTSensor {
         
         if (md && Object.hasOwn(md, 0x004c)){
             if (md[0x004c].value.slice(0,2).join() != [0x02, 0x15].join()){ // iBeacons are exempt
+                // Also exempt devices that advertise a Local Name (e.g. BlueSim simulator)
+                const name = await this.getDeviceProp(device, "Name");
+                if (name && name.trim().length > 0) return null;
                 return this;
             }
 
