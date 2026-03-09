@@ -280,7 +280,7 @@ module.exports = function (app) {
       plugin.debug('BLE API mode: using server BLE API')
       const BLEApiDevice = require('./BLEApiDevice.js')
 
-      bleApiUnsubscribe = app.bleApi.onAdvertisement((adv) => {
+      bleApiUnsubscribe = app.bleApi.onAdvertisement(plugin.id, (adv) => {
         // Process advertisements from local BLE provider or any remote gateway
 
         const mac = adv.mac.toUpperCase()
