@@ -386,7 +386,7 @@ class RemoteGatewayManager {
         name,
         adv.rssi,
         mfrHex,
-        `remote:${gatewayId || 'unknown'}`
+        this.plugin.id
       )
     }
   }
