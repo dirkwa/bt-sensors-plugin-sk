@@ -22,8 +22,6 @@ const OutOfRangeDevice = require('./OutOfRangeDevice.js')
 const { createChannel, createSession } = require('better-sse')
 const { clearTimeout } = require('timers')
 const loadClassMap = require('./classLoader.js')
-const RemoteGatewayManager = require('./RemoteGatewayManager.js')
-const { debug } = require('node:console')
 class MissingSensor {
   constructor(config) {
     this.config = config
@@ -223,40 +221,12 @@ module.exports = function (app) {
 
   const sensorMap = new Map()
 
-  // Gateway manager — created inside start() once dependencies are available.
-  // The route is registered at module level so it exists before start() runs.
-  let gatewayManager = null
-  let pluginRouter = null
-
-  // BLE Provider API integration — when the server supports the v2 BLE API,
-  // we register as a provider and forward advertisements through it.
-  let bleAdvCallbacks = null
-
-  function emitBLEAdvertisement(mac, name, rssi, manufacturerData, providerId) {
-    if (!bleAdvCallbacks || bleAdvCallbacks.size === 0) return
-    const adv = {
-      mac: mac.toUpperCase(),
-      name: name || undefined,
-      rssi: rssi,
-      manufacturerData: manufacturerData,
-      providerId: providerId,
-      timestamp: Date.now(),
-      connectable: false
-    }
-    for (const cb of bleAdvCallbacks) {
-      try {
-        cb(adv)
-      } catch (e) {
-        plugin.debug(`BLE Provider callback error: ${e.message}`)
-      }
-    }
-  }
-
   // Deferred route registration: Signal K calls start() before
   // registerWithRouter(), so routes that depend on start()-time state
   // are registered via registerStartRoutes() which runs once both the
   // router AND the start-time functions are available.
   let startRouteInstaller = null // set by start()
+  let pluginRouter = null
 
   function registerStartRoutes() {
     if (pluginRouter && startRouteInstaller) {
@@ -267,102 +237,6 @@ module.exports = function (app) {
 
   plugin.registerWithRouter = function (router) {
     pluginRouter = router
-    router.post('/gateway/advertisements', async (req, res) => {
-      if (!gatewayManager) {
-        return res.status(503).json({ error: 'Plugin not started yet' })
-      }
-      try {
-        await gatewayManager.handleAdvertisements(req.body)
-        res.status(200).json({
-          status: 'ok',
-          count: req.body.devices?.length || 0
-        })
-      } catch (e) {
-        plugin.debug(`RemoteGateway: ${e.message}`)
-        res.status(400).json({ error: e.message })
-      }
-    })
-
-    router.get('/gateways', (req, res) => {
-      if (!gatewayManager) {
-        return res.json([])
-      }
-      res.json(gatewayManager.getGatewayInfo())
-    })
-
-    // WebSocket endpoint for ESP32 gateway GATT commands
-    let WebSocketServer
-    try {
-      WebSocketServer = require('ws').WebSocketServer
-    } catch (e) {
-      plugin.debug(
-        'Gateway WS: ws module not available, GATT over WebSocket disabled'
-      )
-    }
-    const wsPath = `/plugins/${plugin.id}/gateway/ws`
-    const gatewayWss = WebSocketServer
-      ? new WebSocketServer({ noServer: true })
-      : null
-
-    if (gatewayWss) {
-      gatewayWss.on('connection', (ws, request) => {
-        let gwGattManager = null
-        const gatewayIp = request.socket.remoteAddress
-
-        ws.on('message', (raw) => {
-          let msg
-          try {
-            msg = JSON.parse(raw.toString())
-          } catch (e) {
-            plugin.debug(`Gateway WS: invalid JSON`)
-            return
-          }
-
-          if (msg.type === 'hello' && !gwGattManager && gatewayManager) {
-            gwGattManager = gatewayManager.registerWebSocket(
-              msg.gateway_id,
-              ws,
-              gatewayIp
-            )
-            gwGattManager.handleHello(msg)
-            // Send acknowledgement
-            ws.send(
-              JSON.stringify({
-                type: 'hello_ack',
-                server_time: Date.now()
-              })
-            )
-            plugin.debug(`Gateway WS: ${msg.gateway_id} connected`)
-          } else if (gwGattManager) {
-            gwGattManager.handleMessage(msg)
-          }
-        })
-
-        ws.on('error', (err) => {
-          plugin.debug(`Gateway WS error: ${err.message}`)
-        })
-      })
-
-      // Attach to the HTTP server for WebSocket upgrade
-      const tryAttachWs = () => {
-        const server = app.server
-        if (!server) {
-          setTimeout(tryAttachWs, 1000)
-          return
-        }
-        server.on('upgrade', (request, socket, head) => {
-          const url = new URL(request.url, `http://${request.headers.host}`)
-          if (url.pathname === wsPath) {
-            gatewayWss.handleUpgrade(request, socket, head, (ws) => {
-              gatewayWss.emit('connection', ws, request)
-            })
-          }
-        })
-        plugin.debug(`Gateway WebSocket endpoint ready at ${wsPath}`)
-      }
-      tryAttachWs()
-    }
-
     registerStartRoutes()
   }
 
@@ -397,62 +271,10 @@ module.exports = function (app) {
       }
     }
 
-    // Initialize the remote BLE gateway manager early, before BT adapter init
-    // which may fail. The gateway works without a local BT adapter.
-    gatewayManager = new RemoteGatewayManager({
-      plugin,
-      sensorMap,
-      instantiateSensor,
-      addSensorToList,
-      getDeviceConfig,
-      emitBLEAdvertisement
-    })
-
     // Determine if server manages local Bluetooth via BLE API
     bleApiMode =
       app.bleApi && app.bleApi.localBluetoothManaged === true
     plugin.debug(`bleApiMode=${bleApiMode} localBluetoothManaged=${app.bleApi?.localBluetoothManaged}`)
-
-    // Register as BLE provider for remote gateways (ESP32s are bt-sensors-specific)
-    if (typeof app.registerBLEProvider === 'function') {
-      bleAdvCallbacks = new Set()
-      app.registerBLEProvider({
-        name: 'bt-sensors BLE (remote gateways)',
-        methods: {
-          startDiscovery: async () => {},
-          stopDiscovery: async () => {},
-          getDevices: async () => {
-            // Only report devices seen by remote gateways, not local
-            const remoteDevices = []
-            for (const [mac, sensor] of sensorMap) {
-              if (sensor.device && sensor.device.constructor.name === 'RemoteDevice') {
-                remoteDevices.push(mac)
-              }
-            }
-            return remoteDevices
-          },
-          onAdvertisement: (cb) => {
-            bleAdvCallbacks.add(cb)
-            plugin.debug(
-              `BLE Provider: onAdvertisement callback registered (${bleAdvCallbacks.size} total)`
-            )
-            return () => bleAdvCallbacks.delete(cb)
-          },
-          supportsGATT: () => gatewayManager.supportsGATT(),
-          availableGATTSlots: () => gatewayManager.availableGATTSlots(),
-          subscribeGATT: async (descriptor, callback) => {
-            return gatewayManager.subscribeGATT(descriptor, callback)
-          }
-        }
-      })
-      plugin.debug(
-        `Registered as BLE provider (bleAdvCallbacks size: ${bleAdvCallbacks.size})`
-      )
-    } else {
-      plugin.debug(
-        'BLE Provider API not available (app.registerBLEProvider not found)'
-      )
-    }
 
     // In BLE API mode, subscribe to server-managed advertisement stream
     // for device discovery (local adapter managed by server, not by us)
@@ -556,16 +378,6 @@ module.exports = function (app) {
             if (sensor.isActive()) await sensor.stopListening()
             removeSensorFromList(sensor)
           }
-          // If the device is known via remote gateway, re-instantiate
-          // from the remote device — avoids local adapter timeout
-          // that would create a MissingSensor.
-          if (gatewayManager) {
-            const reinited = await gatewayManager.reinitDevice(
-              req.body.mac_address,
-              req.body
-            )
-            if (reinited) return
-          }
           if (adapter) initConfiguredDevice(req.body)
         })
       })
@@ -586,7 +398,6 @@ module.exports = function (app) {
 
         if (sensorMap.has(req.body.mac_address))
           sensorMap.delete(req.body.mac_address)
-        if (gatewayManager) gatewayManager.removeDevice(req.body.mac_address)
         app.savePluginOptions(options, () => {
           res.status(200).json({ message: 'Sensor updated' })
           channel.broadcast({}, 'resetSensors')
@@ -1209,7 +1020,6 @@ module.exports = function (app) {
     plugin.debug('Stopping plugin')
     plugin.stopped = true
     plugin.started = false
-    bleAdvCallbacks = null
     bleApiMode = false
     if (bleApiUnsubscribe) {
       bleApiUnsubscribe()

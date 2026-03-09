@@ -400,26 +400,17 @@ class BTSensor extends EventEmitter {
             this.debug(`Paths activated for ${this.getDisplayName()}`);
         }
         if (this.usingGATT()){
-            // Retry GATT activation with backoff — the gateway WebSocket hello
-            // may arrive a few seconds after the first advertisement.
-            const maxAttempts = 5
-            let lastError
-            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                await this.activateGATT()
+            } catch (e) {
+                this.debug(`GATT activate failed, retrying in 5s: ${e.message}`)
+                await new Promise(r => setTimeout(r, 5000))
                 try {
                     await this.activateGATT()
-                    lastError = null
-                    break
-                } catch (e) {
-                    lastError = e
-                    this.debug(`GATT activate attempt ${attempt}/${maxAttempts} failed: ${e.message}`)
-                    if (attempt < maxAttempts) {
-                        await new Promise(r => setTimeout(r, attempt * 5000))
-                    }
+                } catch (lastError) {
+                    this.setError(`GATT services unavailable.`)
+                    throw new Error(`GATT services unavailable for ${this.getName()}. Reason: ${lastError}`)
                 }
-            }
-            if (lastError) {
-                this.setError(`GATT services unavailable.`)
-                throw new Error(`GATT services unavailable for ${this.getName()}. Reason: ${lastError}`)
             }
         } else {
             this.setState("ACTIVE")
