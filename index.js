@@ -953,8 +953,10 @@ module.exports = function (app) {
           (maxTimeout + 1) * 1000
         )
 
-      for (const config of deviceConfigs) {
-        initConfiguredDevice(config)
+      if (!bleApiMode) {
+        for (const config of deviceConfigs) {
+          initConfiguredDevice(config)
+        }
       }
     }
     const minTimeout = Math.min(
