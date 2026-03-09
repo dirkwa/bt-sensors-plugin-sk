@@ -271,15 +271,13 @@ module.exports = function (app) {
       }
     }
 
-    // Determine if server manages local Bluetooth via BLE API
-    bleApiMode =
-      app.bleApi && app.bleApi.localBluetoothManaged === true
-    plugin.debug(`bleApiMode=${bleApiMode} localBluetoothManaged=${app.bleApi?.localBluetoothManaged}`)
+    // Use BLE API mode whenever the server exposes app.bleApi (covers both
+    // local Bluetooth managed by the server and remote ESP32 gateways)
+    bleApiMode = !!app.bleApi
+    plugin.debug(`bleApiMode=${bleApiMode}`)
 
-    // In BLE API mode, subscribe to server-managed advertisement stream
-    // for device discovery (local adapter managed by server, not by us)
     if (bleApiMode) {
-      plugin.debug('BLE API mode: local Bluetooth managed by server')
+      plugin.debug('BLE API mode: using server BLE API')
       const BLEApiDevice = require('./BLEApiDevice.js')
 
       bleApiUnsubscribe = app.bleApi.onAdvertisement((adv) => {
