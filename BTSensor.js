@@ -1107,7 +1107,7 @@ class BTSensor extends EventEmitter {
     emitData(tag, buffer, ...args){
         const md = this.getPath(tag)
         if (md && md.read)
-            this.emit(tag, md.read(buffer, ...args))        
+            this._emit(tag, md.read(buffer, ...args))
     }
 
     emitValuesFrom(buffer){
